@@ -83,14 +83,35 @@ def extract_metadata(pdf_path):
         full_text = ""
 
         with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    full_text += text + "\n"
+            total_pages = len(pdf.pages)
+            
+            # Se tiver muitas páginas, lê apenas o início e o fim para otimizar
+            if total_pages > 20:
+                pages_to_read = pdf.pages[:10] + pdf.pages[-10:]
+            else:
+                pages_to_read = pdf.pages
+
+            for page in pages_to_read:
+                try:
+                    text = page.extract_text()
+                    if text:
+                        full_text += text + "\n"
+                except Exception:
+                    continue  # Ignora páginas com erro de leitura
 
         metadata["inteiro_teor"] = full_text
 
-        # Processo - Regex expandido e fallback para nome do arquivo
+        # ---------------------------------------------------------
+        # ESTRATÉGIA DE EXTRAÇÃO ROBUSTA
+        # ---------------------------------------------------------
+        
+        # 1. Normalização do Texto
+        # Remove quebras de linha excessivas e espaços duplos para manter 'frases'
+        # Mas mantém uma versão completa para buscas que dependem de layout
+        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+        text_normalized = ' '.join(lines)
+
+        # 2. Processo - Regex expandido e fallback para nome do arquivo
         # Padrão CNJ: NNNNNNN-DD.AAAA.J.TR.OORR
         proc_regex = r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}"
         proc = re.search(proc_regex, full_text)
@@ -103,40 +124,88 @@ def extract_metadata(pdf_path):
             if proc_filename:
                 metadata["processo"] = proc_filename.group(0)
 
-        # Nota Técnica / Parecer
-        # Aceita "Parecer Técnico N.", "Nota Técnica nº", etc.
-        # Permite barra no número (ex: 1234/2023)
-        nt_regex = r"(?:Nota\s+T[ée]cnica|Parecer)(?:\s+T[ée]cnico)?\s*(?:n[º°\.]?|número)?\s*(\d+(?:[./-]\d{4})?)"
+        # 3. Nota Técnica / Parecer
+        nt_regex = r"(?:Nota\s+T[ée]cnica|Parecer|Parecer\s+T[ée]cnico)\s*(?:n[º°\.]?|número)?\s*(\d+(?:[./-]\d{4})?)"
         nt = re.search(nt_regex, full_text[:2000], re.IGNORECASE)
         
         if nt:
             metadata["n_nota_tecnica"] = nt.group(1)
         else:
-            # Tenta extrair do início do nome do arquivo se parecer ser um ID (ex: "22458 Parecer...")
-            # Pega números no início do arquivo seguidos de espaço ou delimitador
             nt_filename = re.match(r"^(\d+)\s", filename)
             if nt_filename:
                 metadata["n_nota_tecnica"] = nt_filename.group(1)
 
-        # CID
-        cid = re.search(r"CID\s*[:\-]?\s*([A-Z]\d{2}(?:\.\d)?)", full_text)
-        if cid:
-            metadata["cid"] = cid.group(1)
-
-        # Assunto
-        assunto = re.search(r"Assunto\s*[:\-]\s*(.*)", full_text)
-        if assunto:
-            metadata["Assunto"] = assunto.group(1).strip()
-
-        # Data do Envio (geralmente ao final)
-        # Procura por "Goiânia, DD de Mes de AAAA"
-        # \s* permite casos como "27demaio" (sem espaço) se necessário, ou formatação irregular
-        data_regex = r"Goiânia(?:-GO)?\s*,?\s*(\d{1,2})\s*de\s*([A-Za-zç]+)\s*de\s*(\d{4})"
-        # Busca nas últimas 1000 caracteres para otimizar e focar no rodapé
-        data_envio = re.search(data_regex, full_text[-1000:], re.IGNORECASE)
+        # 4. CID (Classificação Internacional de Doenças)
+        # Tenta padrões comuns, incluindo espaços (E 04.8) e sem separador CID
+        cid_regexes = [
+            r"CID(?:-10)?\s*[:\-]?\s*([A-Z]\d{2}(?:\.?\d{1})?)", # Padrão
+            r"CID\s*[:\-]?\s*([A-Z]\s?\d{2}(?:\.?\d{1})?)",     # Com espaço extra
+            r"Diagnóstico.*([A-Z]\d{2}(?:\.\d{1})?)",            # Contexto Diagnóstico
+        ]
         
-        if data_envio:
-            dia, mes, ano = data_envio.groups()
+        for regex in cid_regexes:
+            cid_match = re.search(regex, full_text, re.IGNORECASE | re.DOTALL)
+            if cid_match:
+                # Remove espaços internos possíveis (ex: E 04.8 -> E04.8) para padronizar
+                cid_clean = cid_match.group(1).replace(" ", "")
+                metadata["cid"] = cid_clean
+                break
+
+        # 5. Assunto / Objeto / Medicamento
+        # Tenta extrair blocos de texto entre cabeçalhos comuns
+        
+        # Assunto: Geralmente logo no início, após cabeçalho "Assunto:"
+        # Captura até encontrar um padrão de próxima seção (ex: "I -", "1.", "DA CONSULTA")
+        assunto_regex = r"Assunto\s*[:\-]\s*(.*?)(?=(?:I\s*[\-\)]|1\.|DA IDENTIFICAÇÃO|DA CONSULTA|DADOS DO PROCESSO|$))"
+        assunto_match = re.search(assunto_regex, full_text, re.IGNORECASE | re.DOTALL)
+        if assunto_match:
+            assunto_limpo = assunto_match.group(1).strip().replace('\n', ' ')
+            metadata["Assunto"] = assunto_limpo[:500] if len(assunto_limpo) > 500 else assunto_limpo 
+
+        # Medicamento / Objeto
+        # Busca por termos chave que indiquem o que está sendo pedido
+        termos_objeto = ["Solicita", "Requer", "Prescrição", "Medicamento", "Fármaco", "Procedimento"]
+        for termo in termos_objeto:
+            # Busca algo como "Solicita: exame oncotype" ou "Medicamento: xxxx"
+            # Pega a linha ou frase inteira
+            obj_match = re.search(fr"{termo}(?:ção)?\s*[:\-]?\s*([^.;\n]*?[a-zA-Z]{{3,}}[^.;\n]*)", full_text, re.IGNORECASE)
+            if obj_match:
+                possivel_objeto = obj_match.group(1).strip()
+                # Evita capturar textos genéricos de cabeçalho
+                if len(possivel_objeto) > 3 and "..." not in possivel_objeto:
+                    if metadata["objeto"] is None:
+                        metadata["objeto"] = possivel_objeto
+                    elif possivel_objeto not in metadata["objeto"]:
+                        metadata["objeto"] += f" | {possivel_objeto}"
+
+        # 6. Desfecho / Conclusão
+        # Procura seção de conclusão
+        conclusao_regex = r"(?:V\)|IV\)|Conclusão|Considerações Finais)\s*[:\-]?\s*(.*?)(?:Goiânia|Este é o parecer|$)"
+        conclusao_match = re.search(conclusao_regex, full_text, re.IGNORECASE | re.DOTALL)
+        
+        if conclusao_match:
+            texto_conclusao = conclusao_match.group(1).lower()
+            if "favorável" in texto_conclusao and "desfavorável" not in texto_conclusao:
+                metadata["desfecho"] = "Favorável"
+            elif "desfavorável" in texto_conclusao:
+                metadata["desfecho"] = "Desfavorável"
+            elif "parcialmente" in texto_conclusao:
+                metadata["desfecho"] = "Parcialmente Favorável"
+            else:
+                metadata["desfecho"] = "Inconclusivo / Não Identificado Explicitamente"
+        else:
+            # Tenta encontrar palavras soltas perto do fim
+            if "favorável" in full_text[-2000:].lower():
+                 metadata["desfecho"] = "Favorável (Inferido)"
+
+        # 7. Data do Envio (geralmente ao final)
+        data_regex = r"Goiânia(?:-GO)?\s*,?\s*(\d{1,2})\s*de\s*([A-Za-zç]+)\s*de\s*(\d{4})"
+        
+        # Encontra todas as correspondências e pega a última
+        datas_encontradas = re.findall(data_regex, full_text, re.IGNORECASE)
+        
+        if datas_encontradas:
+            dia, mes, ano = datas_encontradas[-1]
             metadata["data_do_envio"] = f"{dia} de {mes} de {ano}"
 
         return metadata

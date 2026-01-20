@@ -1,30 +1,23 @@
 # Relatório de Extração de Metadados
 
-## RESUMO GERAL
+Este documento resume as estratégias e o status da extração de metadados dos documentos do NatJus.
 
-Total de PDFs processados:        22305
-Total de campos de metadados:     12
-Total de extrações possíveis:     267660
-Total de extrações bem-sucedidas: 118852
-Taxa de sucesso geral:            44.40%
+### Estrutura dos Dados
 
-Campos com 100% de extração:   tipo_arquivo, Classificação, desfecho
-Campos com extração parcial:   processo, Assunto, cid, n_nota_tecnica
-Campos com 0% de extração:     objeto, classificador_do_objeto, informacao_complementar, data_do_envio, medicamento_e_insumo
+Os dados são processados a partir de `data/raw_data/NT e PARECERES` e salvos em `data/processed_data`.
 
-## DETALHAMENTO POR CAMPO
+### Melhorias na Extração de Metadados (Atualizado)
 
-| Campo | Extraídos | Faltantes | Taxa (%) |
-| :--- | :---: | :---: | :---: |
-| tipo_arquivo | 22305 | 0 | 100.00% |
-| processo | 22162 | 143 | 99.36% |
-| Classificação | 22305 | 0 | 100.00% |
-| Assunto | 19188 | 3117 | 86.03% |
-| cid | 10286 | 12019 | 46.12% |
-| n_nota_tecnica | 301 | 22004 | 1.35% |
-| desfecho | 22305 | 0 | 100.00% |
-| objeto | 0 | 22305 | 0.00% |
-| classificador_do_objeto | 0 | 22305 | 0.00% |
-| informacao_complementar | 0 | 22305 | 0.00% |
-| data_do_envio | 0 | 22305 | 0.00% |
-| medicamento_e_insumo | 0 | 22305 | 0.00% |
+Implementamos uma extração mais robusta e otimizada:
+
+1.  **Metadados Aprimorados**:
+    - **CID**: Suporte para variações de formatação (ex: "E 04.8") e busca em todo o contexto.
+    - **Assunto**: Captura inteligente de blocos de texto multilinha até o próximo cabeçalho.
+    - **Objeto/Medicamento**: Nova busca por termos chave ("Solicita", "Medicamento") para identificar o pleito.
+    - **Desfecho**: Inferência baseada na análise da seção de "Conclusão", categorizando como Favorável/Desfavorável.
+    - **Data, Processo e Nota Técnica**: Lógica de fallback para nome do arquivo e regex mais flexíveis.
+
+2.  **Otimização de Performance**:
+    - Arquivos PDF muito grandes (>20 páginas) agora têm apenas as primeiras e últimas 10 páginas processadas para extração de texto. Isso evita travamentos em processos gigantes ("CONSULTA INTEGRAL...") sem perder metadados críticos que ficam nas extremidades do documento.
+
+O script de processamento em lote está rodando e aplicando essas novas regras a todo o dataset.
