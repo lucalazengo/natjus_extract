@@ -2,8 +2,8 @@ import json
 import os
 
 # Configuration
-INPUT_FILE = r"C:\Users\mlzengo\Documents\TJGO\II SEMESTRE\natjus_extract\data\processed_data\metadados_extraidos.json"
-OUTPUT_FILE = r"C:\Users\mlzengo\Documents\TJGO\II SEMESTRE\natjus_extract\relatorio_extracao.md"
+INPUT_FILE = r"/Users/universo369/Documents/UNIVERSO_369/U369_root/RESIDENCIA EM TI - TJGO + TJGO/TJGO/II SEMESTRE/notas_legacy/natjus_extract/data/processed_data/metadados_extraidos.json"
+OUTPUT_FILE = r"/Users/universo369/Documents/UNIVERSO_369/U369_root/RESIDENCIA EM TI - TJGO + TJGO/TJGO/II SEMESTRE/notas_legacy/natjus_extract/data/processed_data/relatorio_extracao.md"
 
 # Fields to include in the analysis (excluding 'source_filename' and 'inteiro_teor' as they are base data)
 FIELDS_TO_ANALYZE = [
