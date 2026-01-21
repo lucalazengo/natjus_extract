@@ -1,19 +1,39 @@
-from pypdf import PdfReader
-from io import BytesIO
+import json
 import os
+import re
+import sys
+from datetime import datetime
 from elasticsearch import Elasticsearch
-from docx import Document as DocxDocument
+from elasticsearch.helpers import bulk
 
-from models.parecer_cid import ParecerCID
-from models.parecer_objeto import ParecerObjeto
-from models.parecer_classificador import ParecerClassificador
-from models.parecer_insumo import ParecerInsumo
-from models.parecer_medicamento import ParecerMedicamento
+# =========================
+# CONFIGURAÇÕES DINÂMICAS
+# =========================
 
-NOME_INDICE = "vw-natjus-tjgo"
+# 1. Identifica onde este script está salvo no computador atual
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 2. Constrói o caminho para a pasta de dados de forma relativa
+# Ajuste aqui se o seu script estiver dentro de uma subpasta (ex: src/scripts)
+# Se estiver na raiz do projeto (natjus_extract), isso funcionará perfeitamente.
+PROCESSED_DATA_DIR = os.path.join(BASE_DIR, "data", "processed_data")
+INPUT_JSON = os.path.join(PROCESSED_DATA_DIR, "metadados_extraidos.json")
+
+NOME_INDICE = "vw-natjus_tjgo"
+BATCH_SIZE = 1000
+
+# =========================
+# CONEXÃO ELASTICSEARCH
+# =========================
+
+# Verifica variáveis de ambiente antes de tentar conectar
+elastic_url = os.getenv("ELASTICSEARCH_URL")
+if not elastic_url:
+    print("ERRO: Variável de ambiente ELASTICSEARCH_URL não definida.")
+    sys.exit(1)
 
 cliente = Elasticsearch(
-    os.getenv("ELASTICSEARCH_URL"),
+    elastic_url,
     basic_auth=(os.getenv("ELASTIC_USERNAME"), os.getenv("ELASTIC_PASSWORD")),
     verify_certs=False,
     ssl_show_warn=False,
@@ -21,143 +41,111 @@ cliente = Elasticsearch(
     retry_on_timeout=True
 )
 
-TEM_DOCX = True
+# =========================
+# UTILITÁRIOS
+# =========================
 
+MESES = {
+    "janeiro": "01", "fevereiro": "02", "março": "03", "abril": "04",
+    "maio": "05", "junho": "06", "julho": "07", "agosto": "08",
+    "setembro": "09", "outubro": "10", "novembro": "11", "dezembro": "12"
+}
 
-def create_index_with_new_mapping(client, index_name):
+def converter_data(data_extenso):
     """
-    ATENÇÃO: deletar e recriar remove todos os documentos do índice.
-    Use apenas quando você quiser "resetar" o índice (ex.: em ambiente de teste).
+    Converte '10 de Janeiro de 2025' para '2025-01-10'.
+    Retorna None se falhar.
     """
-    if client.indices.exists(index=index_name):
-        print(f"Índice '{index_name}' já existe. Deletando para recriar com o novo mapeamento...")
-        client.indices.delete(index=index_name)
+    if not data_extenso:
+        return None
+    
+    try:
+        # Regex flexível para dia, mês e ano
+        match = re.search(r"(\d{1,2})\s*de\s*([A-Za-zç]+)\s*de\s*(\d{4})", data_extenso, re.IGNORECASE)
+        if match:
+            dia, mes_nome, ano = match.groups()
+            mes_numero = MESES.get(mes_nome.lower())
+            
+            if mes_numero:
+                return f"{ano}-{mes_numero}-{dia.zfill(2)}"
+    except Exception:
+        pass
+    
+    return None
 
-    print(f"Criando índice '{index_name}' com o novo mapeamento...")
+# =========================
+# PROCESSO DE INDEXAÇÃO
+# =========================
 
-    mapping = {
-        "properties": {
+def gerar_acoes(dados):
+    """
+    Gerador para a API Bulk do Elasticsearch.
+    """
+    for item in dados:
+        data_iso = converter_data(item.get("data_do_envio"))
 
-            "source_filename": {"type": "keyword"},
-            "tipo_arquivo": {"type": "keyword"},
-            "processo": {"type": "keyword"},
-            "cid": {"type": "keyword"},
-            "n_nota_tecnica": {"type": "text", "analyzer": "portuguese"},
-            "desfecho": {"type": "keyword"},
-            "inteiro_teor": {"type": "text", "analyzer": "portuguese"},
-
-            "objeto": {"type": "text", "analyzer": "portuguese"},
-            "classificador_do_objeto": {"type": "text", "analyzer": "portuguese"},
-            "informacao_complementar": {"type": "text", "analyzer": "portuguese"},
-            "medicamento_e_insumo": {"type": "text", "analyzer": "portuguese"},
-            "data_do_envio": {"type": "date", "format": "yyyy-MM-dd"},
+        doc = {
+            "_index": NOME_INDICE,
+            "_source": {
+                "tipo": item.get("tipo", "legado"), 
+                "source_filename": item.get("source_filename"),
+                "tipo_arquivo": item.get("tipo_arquivo"),
+                "processo": item.get("processo"),
+                "cid": item.get("cid"), 
+                "n_nota_tecnica": item.get("n_nota_tecnica"),
+                "desfecho": item.get("desfecho"),
+                "inteiro_teor": item.get("inteiro_teor", ""),
+                
+                "objeto": item.get("objeto"),
+                "classificador_do_objeto": item.get("classificador_do_objeto"),
+                "informacao_complementar": item.get("informacao_complementar"),
+                "medicamento_e_insumo": item.get("medicamento_e_insumo"),
+                
+                "data_do_envio": data_iso
+            }
         }
-    }
+        yield doc
 
-    client.indices.create(index=index_name, mappings=mapping)
-    print("Novo índice criado com sucesso.")
+def main():
+    # Debug: Mostra onde o script está procurando o arquivo
+    print(f"Diretório base detectado: {BASE_DIR}")
+    print(f"Procurando JSON em: {INPUT_JSON}")
 
-
-def garantir_indice(client, index_name):
-    """
-    Se RECRIAR_INDICE_ELASTIC=1/true, recria o índice com o mapping acima.
-    Caso contrário, cria apenas se não existir.
-    """
-    recriar = (os.getenv("RECRIAR_INDICE_ELASTIC", "").strip().lower() in {"1", "true", "sim", "yes"})
-    existe = client.indices.exists(index=index_name)
-
-    if recriar:
-        create_index_with_new_mapping(client, index_name)
+    if not os.path.exists(INPUT_JSON):
+        print("\n[ERRO CRÍTICO] Arquivo JSON não encontrado.")
+        print(f"Certifique-se de que a pasta 'data' está junto deste script.")
+        print(f"Caminho tentado: {INPUT_JSON}")
         return
 
-    if not existe:
-        print(f"Índice '{index_name}' não existe. Criando com o novo mapeamento...")
-        create_index_with_new_mapping(client, index_name)
+    print("Carregando arquivo JSON...")
+    try:
+        with open(INPUT_JSON, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+    except Exception as e:
+        print(f"Erro ao ler o arquivo JSON: {e}")
+        return
 
-
-def extrair_texto(nome_arquivo, arquivo_bytes):
-    _, ext = os.path.splitext(nome_arquivo)
-    ext = ext.lower()
-    texto = ""
+    total_docs = len(dados)
+    print(f"Documentos carregados: {total_docs}")
+    print(f"Iniciando envio para o Elasticsearch (Índice: {NOME_INDICE})...")
 
     try:
-        if ext == ".pdf":
-            reader = PdfReader(BytesIO(arquivo_bytes))
-            for page in reader.pages:
-                texto += (page.extract_text() or "") + "\n"
+        sucesso, falhas = bulk(
+            cliente, 
+            gerar_acoes(dados), 
+            chunk_size=BATCH_SIZE,
+            stats_only=True,
+            raise_on_error=False
+        )
 
-        elif ext == ".docx" and TEM_DOCX:
-            doc = DocxDocument(BytesIO(arquivo_bytes))
-            for para in doc.paragraphs:
-                texto += para.text + "\n"
-
-        elif ext in [".doc", ".odt", ".txt"]:
-            texto = arquivo_bytes.decode("utf-8", errors="ignore")
-
-        else:
-            print(f"Formato de arquivo não suportado para extração de texto: {ext}")
-            return None
+        print("-" * 40)
+        print(f"✅ Processo finalizado!")
+        print(f"Arquivos indexados: {sucesso}")
+        print(f"Falhas: {falhas}")
+        print("-" * 40)
 
     except Exception as e:
-        print(f"Erro ao ler {nome_arquivo}: {e}")
-        return None
+        print(f"Erro de conexão ou envio: {e}")
 
-    return texto.strip()
-
-
-def criar_documento(nome_arquivo, arquivo_bytes, parecer_model):
-
-    garantir_indice(cliente, NOME_INDICE)
-
-    texto = extrair_texto(nome_arquivo, arquivo_bytes)
-    if not texto:
-        print(f"Nenhum texto extraído do arquivo: {nome_arquivo}")
-        return None
-
-    processo = getattr(parecer_model, "n_processo", None)
-    nota_tecnica = getattr(parecer_model, "nota_tecnica", None)
-    data_do_envio = getattr(parecer_model, "dt_envio", None)
-    informacao_complementar = getattr(parecer_model, "informacoes_complementares", None)
-
-    desfecho = None
-    if getattr(parecer_model, "desfecho", None) is not None:
-        desfecho = getattr(parecer_model.desfecho, "desfecho", None)
-
-    parecer_id = parecer_model.id
-    lista_objetos_cid = ParecerCID.get_list_cid(parecer_id)
-    cid_list = [c.codigo for c in lista_objetos_cid if getattr(c, "codigo", None)]
-
-    lista_objetos = ParecerObjeto.get_list_objetos(parecer_id)
-    objeto_textos = [obj.nome for obj in lista_objetos if getattr(obj, "nome", None)]
-
-    lista_classificador = ParecerClassificador.get_list_classificadores(parecer_id)
-    classificador_textos = [cls.nome for cls in lista_classificador if getattr(cls, "nome", None)]
-
-    lista_insumos = ParecerInsumo.get_list_insumos(parecer_id)
-    lista_medicamentos = ParecerMedicamento.get_list_medicamentos(parecer_id)
-    medicamento_e_insumo = [f"{med.principio_ativo} - {med.nome}: {med.apresentacao}" for med in lista_medicamentos if getattr(med, "nome", None)]
-    medicamento_e_insumo += [insumo.descricao for insumo in lista_insumos if getattr(insumo, "descricao", None)]
-
-    documento = {
-        "source_filename": nome_arquivo,
-        "tipo_arquivo": os.path.splitext(nome_arquivo)[1].lower(),
-        "processo": processo,
-        "cid": cid_list,
-        "n_nota_tecnica": nota_tecnica,
-        "desfecho": desfecho,
-        "inteiro_teor": texto,
-        "objeto": objeto_textos,
-        "classificador_do_objeto": classificador_textos,
-        "informacao_complementar": informacao_complementar,
-        "data_do_envio": data_do_envio,
-        "medicamento_e_insumo": medicamento_e_insumo
-    }
-
-    print(">>> INICIANDO INDEXAÇÃO NO ELASTIC")
-    try:
-        response = cliente.index(index=NOME_INDICE, document=documento)
-        print(">>> INDEXAÇÃO CONCLUÍDA COM SUCESSO")
-        return response
-    except Exception as e:
-        print(f">>> ERRO REAL AO INDEXAR: {e}")
-        raise
+if __name__ == "__main__":
+    main()
