@@ -1,9 +1,11 @@
 import json
 import os
+import ijson
+from collections import defaultdict
 
 # Configuration
-INPUT_FILE = r"/Users/universo369/Documents/UNIVERSO_369/U369_root/RESIDENCIA EM TI - TJGO + TJGO/TJGO/II SEMESTRE/notas_legacy/natjus_extract/data/processed_data/metadados_extraidos.json"
-OUTPUT_FILE = r"/Users/universo369/Documents/UNIVERSO_369/U369_root/RESIDENCIA EM TI - TJGO + TJGO/TJGO/II SEMESTRE/notas_legacy/natjus_extract/data/processed_data/relatorio_extracao.md"
+INPUT_FILE = r"data/processed_data/metadados_extraidos.json"
+OUTPUT_FILE = r"data/processed_data/relatorio_extracao.md"
 
 # Fields to include in the analysis (excluding 'source_filename' and 'inteiro_teor' as they are base data)
 FIELDS_TO_ANALYZE = [
@@ -18,13 +20,8 @@ FIELDS_TO_ANALYZE = [
     "classificador_do_objeto",
     "informacao_complementar",
     "data_do_envio",
-    "medicamento_e_insumo"
+    "medicamento_e_insumo",
 ]
-
-def load_data(filepath):
-    print(f"Loading data from {filepath}...")
-    with open(filepath, 'r', encoding='utf-8') as f:
-        return json.load(f)
 
 def is_valid(value):
     """Check if the value counts as a successful extraction."""
@@ -38,24 +35,41 @@ def is_valid(value):
         return True
     return False
 
-def generate_report(data):
-    total_pdfs = len(data)
+def generate_report_streaming(filepath):
+    print(f"Reading data from {filepath} (streaming mode)...")
+    
+    total_pdfs = 0
     num_fields = len(FIELDS_TO_ANALYZE)
     
-    field_stats = {}
+    # Use simple counters
+    extracted_counts = defaultdict(int)
     
-    # Calculate stats per field
+    try:
+        with open(filepath, 'rb') as f:
+            # Iterate over items in the main array
+            for item in ijson.items(f, 'item'):
+                total_pdfs += 1
+                for field in FIELDS_TO_ANALYZE:
+                    val = item.get(field)
+                    if is_valid(val):
+                        extracted_counts[field] += 1
+                        
+                if total_pdfs % 100 == 0:
+                    print(f"Processed stats for {total_pdfs} items...", end='\r')
+
+    except Exception as e:
+        print(f"\nError reading JSON stream: {e}")
+        return None
+
+    print(f"\nFinished processing {total_pdfs} items.")
+
+    field_stats = {}
     for field in FIELDS_TO_ANALYZE:
-        extracted_count = 0
-        for entry in data:
-            val = entry.get(field)
-            if is_valid(val):
-                extracted_count += 1
-        
+        count = extracted_counts[field]
         field_stats[field] = {
-            "extracted": extracted_count,
-            "missing": total_pdfs - extracted_count,
-            "rate": (extracted_count / total_pdfs * 100) if total_pdfs > 0 else 0
+            "extracted": count,
+            "missing": total_pdfs - count,
+            "rate": (count / total_pdfs * 100) if total_pdfs > 0 else 0
         }
 
     # Aggregate stats
@@ -87,42 +101,30 @@ def generate_report(data):
     
     lines.append("## DETALHAMENTO POR CAMPO")
     lines.append("")
-    # Table Header
-    # Campo | Extraídos | Faltantes | Taxa (%)
-    # Using a markdown table usually, but the user showed a text layout. 
-    # I will use a markdown table for clarity as it renders well.
-    
     lines.append("| Campo | Extraídos | Faltantes | Taxa (%) |")
     lines.append("| :--- | :---: | :---: | :---: |")
     
-    # Sort fields for better readability? Or keep prioritized order? 
-    # Alphabetical might be nice, or by rate. Let's keep the defined order.
     for field in FIELDS_TO_ANALYZE:
         s = field_stats[field]
         lines.append(f"| {field} | {s['extracted']} | {s['missing']} | {s['rate']:.2f}% |")
 
-    report_content = "\n".join(lines)
-    
-    return report_content
+    return "\n".join(lines)
 
 def main():
     if not os.path.exists(INPUT_FILE):
         print(f"Error: Input file not found: {INPUT_FILE}")
         return
 
-    data = load_data(INPUT_FILE)
-    if not isinstance(data, list):
-        print("Error: JSON data is not a list.")
-        return
-
-    report = generate_report(data)
+    # Use streaming function
+    report = generate_report_streaming(INPUT_FILE)
     
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        f.write(report)
-    
-    print(f"Report successfully generated at: {OUTPUT_FILE}")
-    print("-" * 30)
-    print(report)
+    if report:
+        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+            f.write(report)
+        
+        print(f"Report successfully generated at: {OUTPUT_FILE}")
+        print("-" * 30)
+        print(report)
 
 if __name__ == "__main__":
     main()

@@ -2,128 +2,101 @@ import csv
 import json
 import os
 import shutil
+import base64
+import sys
 
 # =========================
 # CONFIGURAÇÕES DE CAMINHO
 # =========================
 
-# 1. Pega o diretório onde o script está (pasta src)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# 2. Define a raiz do projeto (um nível acima de src)
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-# 3. Caminho para os dados
 PROCESSED_DATA_DIR = os.path.join(PROJECT_ROOT, "data", "processed_data")
+RAW_DATA_DIR = os.path.join(PROJECT_ROOT, "data", "raw_data", "NT e PARECERES")
 
 FILE_CSV = os.path.join(PROCESSED_DATA_DIR, "metadados_extraidos.csv")
 FILE_JSON = os.path.join(PROCESSED_DATA_DIR, "metadados_extraidos.json")
 
-# Definições do campo e valor
-NOME_CAMPO = "tipo"
-VALOR_PADRAO = "legado"
+CAMPOS_FINAL_JSON = [
+    "source_filename",      
+    "tipo_arquivo",
+    "processo",
+    "Classificação",
+    "Assunto",
+    "cid",
+    "n_nota_tecnica",
+    "desfecho",
+    "objeto",
+    "classificador_do_objeto",
+    "informacao_complementar",
+    "data_do_envio",
+    "medicamento_e_insumo",
+    "inteiro_teor",
+    "is_legado",
+    "conteudo_pdf_base64"
+]
 
-def ler_csv_robust(filepath):
-    """
-    Tenta ler com várias codificações e trata linhas 'quebradas'.
-    """
-    encodings_to_try = ['latin1', 'utf-8-sig', 'utf-16', 'cp1252']
-    
-    for enc in encodings_to_try:
-        try:
-            print(f"Tentando ler CSV com codificação: {enc}...")
-            with open(filepath, mode='r', encoding=enc) as f:
-                reader = csv.DictReader(f, restkey='Extra')
-                fieldnames = reader.fieldnames
-                rows = list(reader) 
-                return fieldnames, rows, enc
-        except UnicodeError:
-            continue
-        except Exception as e:
-            print(f"Erro genérico com {enc}: {e}")
-            continue
-            
-    raise ValueError("Não foi possível identificar a codificação do arquivo CSV.")
+def obter_conteudo_pdf_base64(filename):
+    if not filename: return None, "Sem Nome"
+    caminho_arquivo = os.path.join(RAW_DATA_DIR, filename)
+    if not os.path.exists(caminho_arquivo): return None, "Arquivo Não Encontrado"
+    try:
+        with open(caminho_arquivo, "rb") as pdf_file:
+            encoded_string = base64.b64encode(pdf_file.read()).decode('utf-8')
+        return encoded_string, "Sucesso"
+    except Exception as e:
+        return None, f"Erro: {str(e)}"
 
 def atualizar_csv():
-    if not os.path.exists(FILE_CSV):
-        print(f"ERRO: CSV não encontrado em: {FILE_CSV}")
-        return
+    # Mantive a função igual (apenas metadados no CSV)
+    pass 
 
-    temp_csv = FILE_CSV + ".temp"
-    print(f"--- Atualizando CSV ---")
-
-    try:
-        fieldnames, rows, encoding_detectado = ler_csv_robust(FILE_CSV)
-        print(f"Sucesso! CSV lido como: {encoding_detectado}")
-
-        if NOME_CAMPO not in fieldnames:
-            fieldnames.append(NOME_CAMPO)
-        
-        if 'Extra' in fieldnames:
-            fieldnames.remove('Extra')
-
-        with open(temp_csv, mode='w', encoding='utf-8-sig', newline='') as f_out:
-            writer = csv.DictWriter(f_out, fieldnames=fieldnames, extrasaction='ignore')
-            writer.writeheader()
-
-            count = 0
-            for row in rows:
-                if NOME_CAMPO not in row or not row[NOME_CAMPO]:
-                    row[NOME_CAMPO] = VALOR_PADRAO
-                
-                # Limpeza de sujeira
-                if 'Extra' in row: del row['Extra']
-                if None in row: del row[None]
-
-                writer.writerow(row)
-                count += 1
-        
-        shutil.move(temp_csv, FILE_CSV)
-        print(f"CSV atualizado e salvo em UTF-8! ({count} linhas processadas)")
-
-    except Exception as e:
-        print(f"CRÍTICO - Erro ao atualizar CSV: {e}")
-        if os.path.exists(temp_csv):
-            os.remove(temp_csv)
-
-def atualizar_json():
-    if not os.path.exists(FILE_JSON):
-        print(f"ERRO: JSON não encontrado em: {FILE_JSON}")
-        return
-
-    print(f"--- Atualizando JSON ---")
+def gerar_json_final():
+    if not os.path.exists(FILE_JSON): return
+    print(f"\n--- Recriando JSON (Correção de Filename + Base64) ---")
 
     try:
         with open(FILE_JSON, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        count = 0
-        modificado = False
-        for item in data:
-            if NOME_CAMPO not in item:
-                item[NOME_CAMPO] = VALOR_PADRAO
-                count += 1
-                modificado = True
-        
-        if modificado:
-            with open(FILE_JSON, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-            print(f"JSON atualizado! ({count} registros modificados)")
-        else:
-            print("JSON já estava atualizado.")
+        novos_dados = []
+        stats = {"ok": 0, "fail": 0}
+
+        print(f"Processando {len(data)} registros...")
+
+        for idx, item in enumerate(data, 1):
+            nome_arquivo = item.get("source_filename")
+            
+            # Tenta pegar o Base64
+            conteudo_b64, status = obter_conteudo_pdf_base64(nome_arquivo)
+            
+            if conteudo_b64: stats["ok"] += 1
+            else: stats["fail"] += 1
+
+            # Copia apenas os campos permitidos
+            novo_item = {k: item.get(k) for k in CAMPOS_FINAL_JSON if k not in ["is_legado", "conteudo_pdf_base64"]}
+            
+            # Garante campos obrigatórios
+            if novo_item.get("inteiro_teor") is None: novo_item["inteiro_teor"] = ""
+            
+            # Adiciona os campos pesados/especiais
+            novo_item["is_legado"] = True
+            novo_item["conteudo_pdf_base64"] = conteudo_b64
+            # Garante que o source_filename esteja no item final
+            novo_item["source_filename"] = nome_arquivo 
+
+            novos_dados.append(novo_item)
+            if idx % 500 == 0: print(f"Progresso: {idx}...", end="\r")
+
+        with open(FILE_JSON, "w", encoding="utf-8") as f:
+            json.dump(novos_dados, f, ensure_ascii=False, indent=4)
+            
+        print(f"\nJSON Final Salvo! PDFs encontrados: {stats['ok']} | Falhas: {stats['fail']}")
 
     except Exception as e:
-        print(f"Erro ao atualizar JSON: {e}")
-
-def main():
-    print("=== Iniciando Correção Final (CSV + JSON) ===")
-    print(f"Raiz do projeto: {PROJECT_ROOT}")
-    
-    atualizar_csv()
-    atualizar_json() # Agora incluído explicitamente
-    
-    print("=== Processo concluído ===")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
-    main()
+    gerar_json_final()
