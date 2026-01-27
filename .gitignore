@@ -4,3 +4,4 @@ secrets/
 data/
 data/raw_data/
 data/processed_data/
+minio_data/

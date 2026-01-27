@@ -1,3 +1,7 @@
 elasticsearch==8.11.0
 pdfplumber
 ijson
+PyPDF2
+minio
+pandas
+numpy

@@ -1,23 +1,28 @@
-import csv
 import json
 import os
-import shutil
-import base64
-import sys
+from minio import Minio
+from minio.error import S3Error
 
 # =========================
-# CONFIGURAÇÕES DE CAMINHO
+# CONFIGURAÇÕES
 # =========================
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
+# Caminhos de arquivos
 PROCESSED_DATA_DIR = os.path.join(PROJECT_ROOT, "data", "processed_data")
 RAW_DATA_DIR = os.path.join(PROJECT_ROOT, "data", "raw_data", "NT e PARECERES")
+FILE_JSON_ENTRADA = os.path.join(PROCESSED_DATA_DIR, "metadados_extraidos.json")
+FILE_JSON_SAIDA = os.path.join(PROCESSED_DATA_DIR, "metadados_com_url.json")
 
-FILE_CSV = os.path.join(PROCESSED_DATA_DIR, "metadados_extraidos.csv")
-FILE_JSON = os.path.join(PROCESSED_DATA_DIR, "metadados_extraidos.json")
+# Configurações MinIO 
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minio@natjus")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET_NAME", "natjus-legado")
+SECURE = False
 
+# Lista de campos permitidos no JSON fina
 CAMPOS_FINAL_JSON = [
     "source_filename",      
     "tipo_arquivo",
@@ -34,69 +39,122 @@ CAMPOS_FINAL_JSON = [
     "medicamento_e_insumo",
     "inteiro_teor",
     "is_legado",
-    "conteudo_pdf_base64"
+    "url_pdf",
+    "caminho_arquivo"
 ]
 
-def obter_conteudo_pdf_base64(filename):
-    if not filename: return None, "Sem Nome"
-    caminho_arquivo = os.path.join(RAW_DATA_DIR, filename)
-    if not os.path.exists(caminho_arquivo): return None, "Arquivo Não Encontrado"
+def setup_minio():
+    """Conecta e cria o bucket se necessário"""
     try:
-        with open(caminho_arquivo, "rb") as pdf_file:
-            encoded_string = base64.b64encode(pdf_file.read()).decode('utf-8')
-        return encoded_string, "Sucesso"
+        client = Minio(
+            MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            secure=SECURE
+        )
+        
+        # Verifica se o bucket existe
+        if not client.bucket_exists(MINIO_BUCKET):
+            client.make_bucket(MINIO_BUCKET)
+            print(f"Bucket '{MINIO_BUCKET}' criado com sucesso.")
+        else:
+            print(f"Bucket '{MINIO_BUCKET}' encontrado.")
+            
+        return client
     except Exception as e:
-        return None, f"Erro: {str(e)}"
+        print(f"Erro ao conectar no MinIO: {e}")
+        return None
 
-def atualizar_csv():
-    # Mantive a função igual (apenas metadados no CSV)
-    pass 
-
-def gerar_json_final():
-    if not os.path.exists(FILE_JSON): return
-    print(f"\n--- Recriando JSON (Correção de Filename + Base64) ---")
+def upload_arquivo(client, filename):
+    """Envia o arquivo para o MinIO e retorna a URL"""
+    if not filename: 
+        return None
+    
+    caminho_local = os.path.join(RAW_DATA_DIR, filename)
+    
+    if not os.path.exists(caminho_local):
+        print(f" [AVISO] Arquivo local não encontrado: {filename}")
+        return None
 
     try:
-        with open(FILE_JSON, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        # Upload do arquivo
+        client.fput_object(
+            MINIO_BUCKET, 
+            filename, 
+            caminho_local, 
+            content_type="application/pdf"
+        )
+        
+        # Gera a URL
+        protocolo = "https" if SECURE else "http"
+        url = f"{protocolo}://{MINIO_ENDPOINT}/{MINIO_BUCKET}/{filename}"
+        return url
 
-        novos_dados = []
-        stats = {"ok": 0, "fail": 0}
-
-        print(f"Processando {len(data)} registros...")
-
-        for idx, item in enumerate(data, 1):
-            nome_arquivo = item.get("source_filename")
-            
-            # Tenta pegar o Base64
-            conteudo_b64, status = obter_conteudo_pdf_base64(nome_arquivo)
-            
-            if conteudo_b64: stats["ok"] += 1
-            else: stats["fail"] += 1
-
-            # Copia apenas os campos permitidos
-            novo_item = {k: item.get(k) for k in CAMPOS_FINAL_JSON if k not in ["is_legado", "conteudo_pdf_base64"]}
-            
-            # Garante campos obrigatórios
-            if novo_item.get("inteiro_teor") is None: novo_item["inteiro_teor"] = ""
-            
-            # Adiciona os campos pesados/especiais
-            novo_item["is_legado"] = True
-            novo_item["conteudo_pdf_base64"] = conteudo_b64
-            # Garante que o source_filename esteja no item final
-            novo_item["source_filename"] = nome_arquivo 
-
-            novos_dados.append(novo_item)
-            if idx % 500 == 0: print(f"Progresso: {idx}...", end="\r")
-
-        with open(FILE_JSON, "w", encoding="utf-8") as f:
-            json.dump(novos_dados, f, ensure_ascii=False, indent=4)
-            
-        print(f"\nJSON Final Salvo! PDFs encontrados: {stats['ok']} | Falhas: {stats['fail']}")
-
+    except S3Error as e:
+        print(f" [ERRO MINIO] Falha ao enviar {filename}: {e}")
+        return None
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        print(f" [ERRO GERAL] {e}")
+        return None
+
+def processar_arquivos():
+    if not os.path.exists(FILE_JSON_ENTRADA):
+        print(f"Arquivo de entrada não encontrado: {FILE_JSON_ENTRADA}")
+        return
+
+    print(f"\n--- Iniciando Upload para MinIO ({MINIO_ENDPOINT}) ---")
+    client = setup_minio()
+    if not client:
+        return
+
+    with open(FILE_JSON_ENTRADA, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    novos_dados = []
+    sucesso = 0
+    total = len(data)
+
+    print(f"Processando {total} documentos...")
+
+    for idx, item in enumerate(data, 1):
+        nome_arquivo = item.get("source_filename")
+        
+        # Faz o Upload e pega a URL
+        url = upload_arquivo(client, nome_arquivo)
+        
+        if url:
+            sucesso += 1
+            print(f" [{idx}/{total}] Upload OK: {nome_arquivo}")
+        else:
+            print(f" [{idx}/{total}] Falha/Ignorado: {nome_arquivo}")
+
+        # Monta o novo item apenas com os campos permitidos
+        novo_item = {}
+        for campo in CAMPOS_FINAL_JSON:
+            # Lógica para preencher os campos especiais
+            if campo == "url_pdf":
+                novo_item[campo] = url
+            elif campo == "caminho_arquivo":
+                novo_item[campo] = url  # Repete a URL aqui como pedido
+            elif campo == "is_legado":
+                novo_item[campo] = True
+            elif campo == "inteiro_teor":
+                # Garante que não seja None
+                novo_item[campo] = item.get(campo) or ""
+            else:
+                # Copia do original
+                novo_item[campo] = item.get(campo)
+
+        novos_dados.append(novo_item)
+
+    # Salva o resultado no novo arquivo
+    with open(FILE_JSON_SAIDA, "w", encoding="utf-8") as f:
+        json.dump(novos_dados, f, ensure_ascii=False, indent=4)
+    
+    print(f"\n--- Processo Concluído ---")
+    print(f"Arquivos processados: {total}")
+    print(f"Uploads com sucesso: {sucesso}")
+    print(f"JSON gerado em: {FILE_JSON_SAIDA}")
 
 if __name__ == "__main__":
-    gerar_json_final()
+    processar_arquivos()
